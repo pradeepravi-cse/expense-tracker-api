@@ -1,0 +1,26 @@
+# dependencies
+node_modules
+.pnpm-store
+# builds
+dist
+build
+# tests/coverage
+coverage
+.nyc_output
+# logs
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+# env (do not copy secrets; use docker env or secrets manager)
+.env
+.env.*
+# cache
+.eslintcache
+# vcs/editor
+.git
+.gitignore
+.vscode
+.idea
+# misc
+.DS_Store
