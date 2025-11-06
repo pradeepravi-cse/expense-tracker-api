@@ -1,4 +1,4 @@
-import { IsBoolean, IsNumber, IsOptional, IsString } from 'class-validator';
+import { IsNumber, IsOptional, IsString } from 'class-validator';
 import {
   CategoryType,
   ChannelType,
@@ -31,23 +31,4 @@ export class AddRegularExpensesDto {
   @IsOptional()
   @IsString()
   notes!: string;
-
-  @IsOptional()
-  @IsString()
-  billingMonth!: string;
-
-  @IsBoolean()
-  isRecurring!: boolean;
-
-  @IsOptional()
-  @IsString()
-  recurringStart!: string;
-
-  @IsOptional()
-  @IsString()
-  recurringEnd!: string;
-
-  @IsOptional()
-  @IsString()
-  recurringCycle!: 'monthly' | 'yearly';
 }

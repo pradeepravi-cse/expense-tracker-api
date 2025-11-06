@@ -41,23 +41,8 @@ export class RegularExpense {
   @Column({ type: 'text', nullable: true })
   notes?: string;
 
-  @Column({ type: 'varchar', length: 10, nullable: true })
-  billingMonth?: string;
-
-  @Column({ type: 'boolean', default: false })
-  isRecurring?: boolean;
-
   @CreateDateColumn({ type: 'timestamptz', name: 'created_at' })
   createdAt!: Date;
-
-  @Column({ type: 'date', nullable: true })
-  recurringStart?: Date;
-
-  @Column({ type: 'date', nullable: true })
-  recurringEnd?: Date;
-
-  @Column({ type: 'varchar', length: 10, nullable: true })
-  recurringCycle?: 'monthly' | 'yearly';
 
   @UpdateDateColumn({ type: 'timestamptz', name: 'updated_at' })
   updatedAt!: Date;

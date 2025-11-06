@@ -23,6 +23,4 @@ export class AddRegularExpensesDto {
   createdAt!: string;
   @Expose()
   updatedAt!: string;
-  @Expose()
-  isRecurring!: boolean;
 }
