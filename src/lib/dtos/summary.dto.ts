@@ -37,4 +37,7 @@ export class SummaryDtoV2 {
 
   @Expose()
   potentialNextMonthCCBill!: number;
+
+  @Expose()
+  recurringExpense!: number;
 }

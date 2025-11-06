@@ -36,6 +36,7 @@ export enum ChannelType {
   GRAB_PAY = 'grabPay',
   UPI = 'upi',
   CARRY_FORWARD = 'carryForward',
+  others = 'Others',
 }
 
 export enum CategoryType {

@@ -13,7 +13,6 @@ import { ExpensesDto } from './lib/dtos/list-espense.dto';
 import { SummaryDtoV2, SummaryQueryDto } from './lib/dtos/summary.dto';
 
 import { RegularExpense } from './lib/entities/expense.entity';
-import { MonthlySummary } from './lib/entities/monthly-summary.entity';
 import {
   CategoryType,
   ChannelType,
@@ -29,13 +28,10 @@ export class AppService {
   constructor(
     @InjectRepository(RegularExpense)
     private readonly expenseRepo: Repository<RegularExpense>,
-
-    @InjectRepository(MonthlySummary)
-    private readonly monthlySummaryRepo: Repository<MonthlySummary>,
   ) {}
 
   // ---------------------------
-  // Helpers
+  // Helpers (month / timezone)
   // ---------------------------
   private ensure<T>(val: T | null | undefined, message: string): T {
     if (val === null || val === undefined) {
@@ -51,13 +47,11 @@ export class AppService {
       y = month.getUTCFullYear();
       mZeroBased = month.getUTCMonth();
     } else if (/^\d{4}-\d{2}$/.test(month)) {
-      // "YYYY-MM"
       const [ys, ms] = month.split('-');
       y = Number(ys);
       mZeroBased = Number(ms) - 1;
     } else if (/^\d{4}-\d{2}-\d{2}$/.test(month)) {
-      // "YYYY-MM-DD" -> use that month
-      const [ys, ms] = month.split('-'); // day is irrelevant for month range
+      const [ys, ms] = month.split('-');
       y = Number(ys);
       mZeroBased = Number(ms) - 1;
     } else {
@@ -76,11 +70,47 @@ export class AppService {
       throw new HttpException('Invalid month', HttpStatus.BAD_REQUEST);
     }
 
-    // Use UTC so comparisons don’t wobble across timezones
     const start = new Date(Date.UTC(y, mZeroBased, 1, 0, 0, 0, 0));
     const end = new Date(Date.UTC(y, mZeroBased + 1, 1, 0, 0, 0, 0)); // exclusive
-
     return { start, end };
+  }
+
+  /** Default to Malaysia UTC+8 when caller doesn't provide tz. */
+  private getTzOffsetMinutes(tzOffsetMinutes?: number): number {
+    const n = Number(tzOffsetMinutes);
+    if (Number.isFinite(n)) return n;
+    return 480; // UTC+8
+  }
+
+  /** Convert a UTC date into "local wall clock" by offset minutes (no DST rules). */
+  private toLocal(utc: Date, offsetMin: number): Date {
+    return new Date(utc.getTime() + offsetMin * 60_000);
+  }
+  /** Convert a local wall-clock date to UTC by subtracting offset. */
+  private fromLocal(local: Date, offsetMin: number): Date {
+    return new Date(local.getTime() - offsetMin * 60_000);
+  }
+
+  /** Start of local day (as a UTC Date) for a given "now" UTC. */
+  private startOfLocalDayUTC(nowUTC: Date, offsetMin: number): Date {
+    const local = this.toLocal(nowUTC, offsetMin);
+    const sodLocal = new Date(
+      Date.UTC(
+        local.getUTCFullYear(),
+        local.getUTCMonth(),
+        local.getUTCDate(),
+        0,
+        0,
+        0,
+        0,
+      ),
+    );
+    return this.fromLocal(sodLocal, offsetMin);
+  }
+  /** Start of *tomorrow* local day (as a UTC Date). */
+  private startOfTomorrowLocalUTC(nowUTC: Date, offsetMin: number): Date {
+    const sodUTC = this.startOfLocalDayUTC(nowUTC, offsetMin);
+    return new Date(sodUTC.getTime() + 24 * 3600 * 1000);
   }
 
   private buildSearchWhere(
@@ -100,7 +130,6 @@ export class AppService {
   // Recurring expansion helpers
   // ---------------------------
 
-  /** Clamp a desired day (1–31) to the last valid day of a given month (UTC). */
   private clampDay(year: number, monthZeroBased: number, day: number): Date {
     const lastDay = new Date(
       Date.UTC(year, monthZeroBased + 1, 0),
@@ -109,28 +138,19 @@ export class AppService {
     return new Date(Date.UTC(year, monthZeroBased, safeDay, 0, 0, 0, 0));
   }
 
-  /** Iterate months (UTC) between start (inclusive) and end (exclusive), returning {y, m0}. */
   private *monthsBetween(
     start: Date,
     endExcl: Date,
   ): Generator<{ y: number; m0: number }> {
     const y = start.getUTCFullYear();
     const m0 = start.getUTCMonth();
-    // Normalize to first of month
     const cursor = new Date(Date.UTC(y, m0, 1));
     while (cursor < endExcl) {
       yield { y: cursor.getUTCFullYear(), m0: cursor.getUTCMonth() };
-      // advance by one month
       cursor.setUTCMonth(cursor.getUTCMonth() + 1, 1);
     }
   }
 
-  /**
-   * Expand a monthly recurring definition into concrete monthly occurrences within [windowStart, windowEnd).
-   * - Uses billingMonth's DAY as the anchor when present, else recurringStart's day, else 1.
-   * - Clamps to last day for short months (e.g., Feb).
-   * - Returns synthetic rows with unique IDs and occurrence date filled in.
-   */
   private expandMonthlyOccurrences(
     row: RegularExpense,
     windowStart: Date,
@@ -143,7 +163,6 @@ export class AppService {
       ? new Date(row.recurringEnd)
       : new Date('2999-12-31T23:59:59Z');
 
-    // No intersection with the query window
     if (planEndExcl <= windowStart || planStart >= windowEndExcl) return [];
 
     const anchorDay = (row as any).billingMonth
@@ -152,13 +171,9 @@ export class AppService {
         ? new Date(row.recurringStart).getUTCDate()
         : 1;
 
-    // Start iterating from the later of planStart/windowStart, normalized to month
+    const later = planStart > windowStart ? planStart : windowStart;
     const firstMonth = new Date(
-      Date.UTC(
-        (planStart > windowStart ? planStart : windowStart).getUTCFullYear(),
-        (planStart > windowStart ? planStart : windowStart).getUTCMonth(),
-        1,
-      ),
+      Date.UTC(later.getUTCFullYear(), later.getUTCMonth(), 1),
     );
 
     const out: RegularExpense[] = [];
@@ -172,10 +187,8 @@ export class AppService {
       ) {
         out.push({
           ...row,
-          id: `${row.id}__${y}-${String(m0 + 1).padStart(2, '0')}`, // synthetic occurrence id
-          // IMPORTANT: override the date to the occurrence date
+          id: `${row.id}__${y}-${String(m0 + 1).padStart(2, '0')}`,
           date: when as any,
-          // keep created/updated timestamps from the definition (or adjust to taste)
           createdAt: (row as any).createdAt,
           updatedAt: (row as any).updatedAt,
         } as RegularExpense);
@@ -193,19 +206,16 @@ export class AppService {
     if (!body) {
       throw new HttpException('Invalid body', HttpStatus.BAD_REQUEST);
     }
-
-    // Optional: reject negative amounts
     if (typeof (body as any).amount !== 'number' || (body as any).amount < 0) {
       throw new HttpException('Amount must be >= 0', HttpStatus.BAD_REQUEST);
     }
-
-    const created = this.expenseRepo.create(body as any);
+    const created = this.expenseRepo.create(body);
     const saved = await this.expenseRepo.save(created);
-    return saved[0];
+    return saved;
   }
 
   // ---------------------------
-  // LIST (with recurring expansion + then paginate)
+  // LIST (keeps future projections visible for planning)
   // ---------------------------
   async listExpenses(q: ListExpensesDto): Promise<ExpensesDto> {
     const page = Number(q.page ?? 1);
@@ -224,7 +234,7 @@ export class AppService {
       ? new Date(q.end)
       : new Date('2999-12-31T23:59:59Z');
 
-    // 1) normal rows (not recurring) filtered by date
+    // 1) normal rows in window
     const whereNormal = this.buildSearchWhere(
       {
         ...whereBase,
@@ -238,7 +248,7 @@ export class AppService {
       order: { date: 'DESC', createdAt: 'DESC' as any },
     });
 
-    // 2) recurring definitions that intersect the window (regardless of row.date)
+    // 2) recurring definitions
     const recurringDefs = await this.expenseRepo.find({
       where: this.buildSearchWhere(
         { ...whereBase, isRecurring: true as any },
@@ -247,20 +257,19 @@ export class AppService {
       order: { createdAt: 'ASC' as any },
     });
 
-    // 3) expand recurring to concrete occurrences within window
+    // 3) expand recurring (list view shows future)
     const recurringOcc = recurringDefs.flatMap((def) => {
-      if ((def as any).recurringCycle !== 'monthly') return []; // extend for other cycles
+      if ((def as any).recurringCycle !== 'monthly') return [];
       return this.expandMonthlyOccurrences(def, windowStart, windowEnd);
     });
 
-    // 4) merge, sort, then paginate
     const merged = [...normalItems, ...recurringOcc].sort((a, b) => {
       const da = new Date(a.date as any).getTime();
       const db = new Date(b.date as any).getTime();
-      if (db !== da) return db - da; // DESC by date
+      if (db !== da) return db - da;
       const ca = new Date((a as any).createdAt).getTime();
       const cb = new Date((b as any).createdAt).getTime();
-      return cb - ca; // tie-breaker
+      return cb - ca;
     });
 
     const total = merged.length;
@@ -274,16 +283,36 @@ export class AppService {
   }
 
   // ---------------------------
-  // SUMMARY (includes expanded recurring)
+  // SUMMARY (bank-aligned)
   // ---------------------------
   async getSummary(query: SummaryQueryDto): Promise<SummaryDtoV2> {
     const currency = this.ensure(
       query.currency as CurrencyType,
       'currency is required',
     );
-    // Month handling (defaults to current month in server TZ)
     const monthStr = query.month ?? new Date().toISOString().slice(0, 7); // YYYY-MM
     const { start, end } = this.monthRange(`${monthStr}-01`);
+
+    const tzOffsetMin = this.getTzOffsetMinutes((query as any).tzOffsetMinutes);
+    const nowUTC = new Date();
+
+    // Hybrid capping (LOCAL time):
+    // - Normal rows: include through start-of-tomorrow (local)
+    // - Recurring projections: include strictly before today (local)
+    const startOfTodayLocalUTC = this.startOfLocalDayUTC(nowUTC, tzOffsetMin);
+    const startOfTomorrowLocalUTC = this.startOfTomorrowLocalUTC(
+      nowUTC,
+      tzOffsetMin,
+    );
+
+    const effectiveEndNormal =
+      start < startOfTomorrowLocalUTC && end > startOfTomorrowLocalUTC
+        ? startOfTomorrowLocalUTC
+        : end;
+    const effectiveEndRecurring =
+      start < startOfTodayLocalUTC && end > startOfTomorrowLocalUTC
+        ? startOfTodayLocalUTC
+        : end;
 
     // Normal (non-recurring) income
     const incomeNormal = await this.expenseRepo
@@ -292,11 +321,14 @@ export class AppService {
       .where('e.currency = :currency', { currency })
       .andWhere('e.type = :type', { type: 'income' })
       .andWhere('(e.isRecurring IS NULL OR e.isRecurring = false)')
-      .andWhere('e.date >= :start AND e.date < :end', { start, end })
+      .andWhere('e.date >= :start AND e.date < :end', {
+        start,
+        end: effectiveEndNormal,
+      })
       .getRawOne<{ v: string }>()
       .then((r) => Number(r?.v ?? 0));
 
-    // Normal (non-recurring) expense (excl creditCard immediate spend; you keep CC bill logic separate)
+    // Normal (non-recurring) expense (exclude creditCard swipes; you handle them via bill)
     const expenseNormal = await this.expenseRepo
       .createQueryBuilder('e')
       .select('COALESCE(SUM(e.amount), 0)', 'v')
@@ -304,28 +336,35 @@ export class AppService {
       .andWhere('e.type = :type', { type: 'expense' })
       .andWhere('(e.isRecurring IS NULL OR e.isRecurring = false)')
       .andWhere("(e.channel IS NULL OR e.channel <> 'creditCard')")
-      .andWhere('e.date >= :start AND e.date < :end', { start, end })
+      .andWhere('e.date >= :start AND e.date < :end', {
+        start,
+        end: effectiveEndNormal,
+      })
       .getRawOne<{ v: string }>()
       .then((r) => Number(r?.v ?? 0));
 
-    // Carry-forward stays as-is
+    // Carry-forward
     const carryForward = await this.expenseRepo
       .createQueryBuilder('e')
       .select('COALESCE(SUM(e.amount), 0)', 'v')
       .where('e.currency = :currency', { currency })
       .andWhere('e.type = :type', { type: 'carryForward' })
-      .andWhere('e.date >= :start AND e.date < :end', { start, end })
+      .andWhere('e.date >= :start AND e.date < :end', {
+        start,
+        end: effectiveEndNormal,
+      })
       .getRawOne<{ v: string }>()
       .then((r) => Number(r?.v ?? 0));
 
-    // Expand recurring occurrences in-memory and sum
-    const recurringDefs = await this.expenseRepo.find({
-      where: { currency: currency as any, isRecurring: true as any },
-    });
+    // Recurring occurrences (up to "before today (local)")
+    const [recurringDefs, totalRecurringDefs] =
+      await this.expenseRepo.findAndCount({
+        where: { currency: currency as any, isRecurring: true as any },
+      });
 
     const recurringOcc = recurringDefs.flatMap((def) => {
       if ((def as any).recurringCycle !== 'monthly') return [];
-      return this.expandMonthlyOccurrences(def, start, end);
+      return this.expandMonthlyOccurrences(def, start, effectiveEndRecurring);
     });
 
     let incomeRecurring = 0;
@@ -341,7 +380,15 @@ export class AppService {
       }
     }
 
-    // Optional: keep your credit-card next bill estimate
+    // Optional: credit-card next bill estimate (unchanged)
+    const [yStr, mStr] = monthStr.split('-');
+    const y = Number(yStr);
+    const m = Number(mStr);
+    const billStart = `${yStr}-${String(m).padStart(2, '0')}-06`;
+    const nextMonth = m === 12 ? 1 : m + 1;
+    const nextYear = m === 12 ? y + 1 : y;
+    const billEnd = `${nextYear}-${String(nextMonth).padStart(2, '0')}-05`;
+
     const potentialNextMonthCCBill = await this.expenseRepo
       .createQueryBuilder('e')
       .select('COALESCE(SUM(e.amount), 0)', 'v')
@@ -349,8 +396,8 @@ export class AppService {
       .andWhere('e.type = :type', { type: 'expense' })
       .andWhere('e.channel = :channel', { channel: 'creditCard' })
       .andWhere('e.date >= :start AND e.date < :end', {
-        start: `${monthStr}-5`,
-        end,
+        start: billStart,
+        end: billEnd,
       })
       .getRawOne<{ v: string }>()
       .then((r) => Number(r?.v ?? 0));
@@ -360,7 +407,14 @@ export class AppService {
     const savings = income - expense;
     const netPosition = savings + carryForward;
 
-    return { income, expense, savings, netPosition, potentialNextMonthCCBill };
+    return {
+      income,
+      expense,
+      savings,
+      netPosition,
+      potentialNextMonthCCBill,
+      recurringExpense: totalRecurringDefs,
+    };
   }
 
   // ---------------------------
@@ -402,7 +456,7 @@ export class AppService {
   }
 
   // ---------------------------
-  // CHARTS (with recurring expansion)
+  // CHARTS (bank-aligned hybrid window)
   // ---------------------------
   async getChartDataByChannel(q: chartDataDto): Promise<any> {
     const whereBase: FindOptionsWhere<RegularExpense> = {};
@@ -415,22 +469,39 @@ export class AppService {
       ? new Date(q.end)
       : new Date('2999-12-31T23:59:59Z');
 
+    const tzOffsetMin = this.getTzOffsetMinutes((q as any).tzOffsetMinutes);
+    const nowUTC = new Date();
+    const startOfTodayLocalUTC = this.startOfLocalDayUTC(nowUTC, tzOffsetMin);
+    const startOfTomorrowLocalUTC = this.startOfTomorrowLocalUTC(
+      nowUTC,
+      tzOffsetMin,
+    );
+
+    // Normal up to start-of-tomorrow (local) if window overlaps; recurring up to start-of-today (local)
+    const effEndNormal =
+      windowStart < startOfTomorrowLocalUTC &&
+      windowEnd > startOfTomorrowLocalUTC
+        ? startOfTomorrowLocalUTC
+        : windowEnd;
+    const effEndRecurring =
+      windowStart < startOfTodayLocalUTC && windowEnd > startOfTomorrowLocalUTC
+        ? startOfTodayLocalUTC
+        : windowEnd;
+
     whereBase.type = ExpenseType.EXPENSE;
 
-    // normal data
     const data = await this.expenseRepo.find({
       where: this.buildSearchWhere(
         {
           ...whereBase,
           isRecurring: false as any,
-          date: Between(windowStart, windowEnd) as any,
+          date: Between(windowStart, effEndNormal) as any,
         },
         undefined,
       ),
       order: { date: 'DESC' },
     });
 
-    // recurring occurrences
     const recurringDefs = await this.expenseRepo.find({
       where: { ...(whereBase as any), isRecurring: true as any },
       order: { createdAt: 'ASC' as any },
@@ -438,7 +509,7 @@ export class AppService {
 
     const recurringOcc = recurringDefs.flatMap((def) => {
       if ((def as any).recurringCycle !== 'monthly') return [];
-      return this.expandMonthlyOccurrences(def, windowStart, windowEnd);
+      return this.expandMonthlyOccurrences(def, windowStart, effEndRecurring);
     });
 
     const all = [...data, ...recurringOcc];
@@ -446,35 +517,24 @@ export class AppService {
     const totalsMap: Record<string, number> = {};
     for (const item of all) {
       const ch = (item.channel || 'unknown') as any;
-      if (!totalsMap[ch]) totalsMap[ch] = 0;
-      totalsMap[ch] += Number(item.amount);
+      totalsMap[ch] = (totalsMap[ch] ?? 0) + Number(item.amount);
     }
 
     const totalsArr = Object.entries(totalsMap).map(([channel, total]) => ({
       channel,
       total,
     }));
-
     totalsArr.sort((a, b) => b.total - a.total);
 
     const top4 = totalsArr.slice(0, 4);
     const rest = totalsArr.slice(4);
-
-    let othersBar: any = null;
-    if (rest.length > 0) {
-      const othersTotal = rest.reduce((sum, r) => sum + r.total, 0);
-      const othersBreakdown = rest.map((r) => ({
-        channel: r.channel,
-        total: r.total,
-      }));
-      othersBar = {
-        channel: 'others',
-        total: othersTotal,
-        breakdown: othersBreakdown,
-      };
-    } else {
-      othersBar = { channel: 'others', total: 0, breakdown: [] };
-    }
+    const othersBar = rest.length
+      ? {
+          channel: 'others',
+          total: rest.reduce((s, r) => s + r.total, 0),
+          breakdown: rest.map((r) => ({ channel: r.channel, total: r.total })),
+        }
+      : { channel: 'others', total: 0, breakdown: [] };
 
     return [...top4, othersBar];
   }
@@ -490,22 +550,38 @@ export class AppService {
       ? new Date(q.end)
       : new Date('2999-12-31T23:59:59Z');
 
+    const tzOffsetMin = this.getTzOffsetMinutes((q as any).tzOffsetMinutes);
+    const nowUTC = new Date();
+    const startOfTodayLocalUTC = this.startOfLocalDayUTC(nowUTC, tzOffsetMin);
+    const startOfTomorrowLocalUTC = this.startOfTomorrowLocalUTC(
+      nowUTC,
+      tzOffsetMin,
+    );
+
+    const effEndNormal =
+      windowStart < startOfTomorrowLocalUTC &&
+      windowEnd > startOfTomorrowLocalUTC
+        ? startOfTomorrowLocalUTC
+        : windowEnd;
+    const effEndRecurring =
+      windowStart < startOfTodayLocalUTC && windowEnd > startOfTomorrowLocalUTC
+        ? startOfTodayLocalUTC
+        : windowEnd;
+
     whereBase.type = ExpenseType.EXPENSE;
 
-    // normal data
     const data = await this.expenseRepo.find({
       where: this.buildSearchWhere(
         {
           ...whereBase,
           isRecurring: false as any,
-          date: Between(windowStart, windowEnd) as any,
+          date: Between(windowStart, effEndNormal) as any,
         },
         undefined,
       ),
       order: { date: 'DESC' },
     });
 
-    // recurring occurrences
     const recurringDefs = await this.expenseRepo.find({
       where: { ...(whereBase as any), isRecurring: true as any },
       order: { createdAt: 'ASC' as any },
@@ -513,7 +589,7 @@ export class AppService {
 
     const recurringOcc = recurringDefs.flatMap((def) => {
       if ((def as any).recurringCycle !== 'monthly') return [];
-      return this.expandMonthlyOccurrences(def, windowStart, windowEnd);
+      return this.expandMonthlyOccurrences(def, windowStart, effEndRecurring);
     });
 
     const all = [...data, ...recurringOcc];
@@ -521,35 +597,27 @@ export class AppService {
     const totalsMap: Record<string, number> = {};
     for (const item of all) {
       const cat = (item.category || 'unknown') as any;
-      if (!totalsMap[cat]) totalsMap[cat] = 0;
-      totalsMap[cat] += Number(item.amount);
+      totalsMap[cat] = (totalsMap[cat] ?? 0) + Number(item.amount);
     }
 
     const totalsArr = Object.entries(totalsMap).map(([category, total]) => ({
       category,
       total,
     }));
-
     totalsArr.sort((a, b) => b.total - a.total);
 
     const top4 = totalsArr.slice(0, 4);
     const rest = totalsArr.slice(4);
-
-    let othersBar: any = null;
-    if (rest.length > 0) {
-      const othersTotal = rest.reduce((sum, r) => sum + r.total, 0);
-      const othersBreakdown = rest.map((r) => ({
-        category: r.category,
-        total: r.total,
-      }));
-      othersBar = {
-        category: 'others',
-        total: othersTotal,
-        breakdown: othersBreakdown,
-      };
-    } else {
-      othersBar = { category: 'others', total: 0, breakdown: [] };
-    }
+    const othersBar = rest.length
+      ? {
+          category: 'others',
+          total: rest.reduce((s, r) => s + r.total, 0),
+          breakdown: rest.map((r) => ({
+            category: r.category,
+            total: r.total,
+          })),
+        }
+      : { category: 'others', total: 0, breakdown: [] };
 
     return [...top4, othersBar];
   }

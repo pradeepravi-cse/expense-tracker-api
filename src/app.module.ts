@@ -9,7 +9,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { RegularExpense } from './lib/entities/expense.entity';
 import { DataSource } from 'typeorm';
-import { MonthlySummary } from './lib/entities/monthly-summary.entity';
+import 'reflect-metadata';
 
 @Module({
   imports: [
@@ -25,11 +25,12 @@ import { MonthlySummary } from './lib/entities/monthly-summary.entity';
         password: ConfigService.get('DB_PASS'),
         database: ConfigService.get('DB_NAME'),
         autoLoadEntities: true,
-        synchronize: false,
+        synchronize: true,
+        entities: [__dirname + '/**/*.entity.ts'],
       }),
       inject: [ConfigService],
     }),
-    TypeOrmModule.forFeature([RegularExpense, MonthlySummary]),
+    TypeOrmModule.forFeature([RegularExpense]),
   ],
   controllers: [AppController],
   providers: [
