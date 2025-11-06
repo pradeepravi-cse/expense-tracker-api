@@ -24,5 +24,9 @@ async function bootstrap() {
   );
 
   await app.listen(process.env.PORT ?? 3000);
+
+  new Logger('Expense Tracker').log(
+    `App Listens to the port ${process.env.PORT ?? 3000}`,
+  );
 }
 bootstrap();

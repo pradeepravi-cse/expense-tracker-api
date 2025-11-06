@@ -25,7 +25,7 @@ function trimSlash(s: string | undefined | null): string | undefined {
 
 export const OidcConfigProvider: Provider = {
   provide: OIDC_CONFIG,
-  useFactory: async (): Promise<OidcConfig> => {
+  useFactory: async (cs: ConfigService): Promise<OidcConfig> => {
     const issuerUrlRaw = config.OIDC_ISSUER;
     if (!issuerUrlRaw) throw new Error('OIDC_ISSUER is required');
 
@@ -50,7 +50,9 @@ export const OidcConfigProvider: Provider = {
     const audience = config.OIDC_CLIENT || undefined;
 
     return {
-      issuer: discovery.issuer, // must equal token `iss` exactly (public HTTPS)
+      issuer:
+        discovery.issuer ??
+        `${cs.get('OIDC_ISSUER')}/protocol/openid-connect/certs`, // must equal token `iss` exactly (public HTTPS)
       jwksUri, // internal HTTP allowed here
       algorithms: algs,
       audience,

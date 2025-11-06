@@ -29,6 +29,7 @@ export class JwtAuthGuard extends AuthGuard('jwt') implements CanActivate {
   }
 
   override handleRequest<TUser = JwtUser>(err: any, user: any): TUser {
+    console.log(err, user);
     if (err) {
       throw httpErr(
         HttpStatus.UNAUTHORIZED,
